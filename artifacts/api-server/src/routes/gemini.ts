@@ -24,8 +24,12 @@ import {
 import { Router, type IRouter, type Request, type Response } from "express";
 
 const router: IRouter = Router();
-const MODEL = "gemini-2.5-flash";
+const MODEL_CANDIDATES = [
+  "gemini-3.8-flash",
+  "gemini-3.5-flash-lite",
+] as const;
 const HISTORY_LIMIT = 20;
+const RETRYABLE_PROVIDER_STATUSES = new Set([408, 429, 500, 502, 503, 504]);
 const SESSION_COOKIE = "context_chat_session";
 const SYSTEM_INSTRUCTION = `You are Rowan, a thoughtful and practical conversation partner. Help people think clearly, learn, and make progress. Be warm, curious, and concise without sounding robotic. Use details from the conversation when relevant, ask a focused follow-up when it would help, and be honest when you are uncertain. Do not claim to remember anything outside the conversation provided to you.`;
 
@@ -85,6 +89,22 @@ function isTimeout(error: unknown): boolean {
     error instanceof Error &&
     /timeout|timed out|aborted/i.test(error.message)
   );
+}
+
+function safeProviderMessage(error: unknown): string | undefined {
+  if (!(error instanceof Error)) {
+    return undefined;
+  }
+
+  let message = error.message;
+  const apiKey = process.env.GEMINI_API_KEY;
+  if (apiKey) {
+    message = message.replaceAll(apiKey, "[redacted]");
+  }
+  return message
+    .replace(/AIza[0-9A-Za-z_-]{20,}/g, "[redacted]")
+    .replace(/([?&](?:key|api_key)=)[^&\s]+/gi, "$1[redacted]")
+    .slice(0, 400);
 }
 
 router.get("/gemini/conversations", async (req, res): Promise<void> => {
@@ -187,21 +207,82 @@ router.post(
 
     try {
       const ai = new GoogleGenAI({ apiKey });
-      const response = await ai.models.generateContent({
-        model: MODEL,
-        contents: [
-          ...contextMessages.map((message) => ({
-            role: message.role === "assistant" ? ("model" as const) : ("user" as const),
-            parts: [{ text: message.content }],
-          })),
-          { role: "user", parts: [{ text: parsedBody.data.content }] },
-        ],
-        config: {
-          systemInstruction: SYSTEM_INSTRUCTION,
-          maxOutputTokens: 8192,
-          httpOptions: { timeout: 30_000 },
-        },
-      });
+      const contents = [
+        ...contextMessages.map((message) => ({
+          role: message.role === "assistant" ? ("model" as const) : ("user" as const),
+          parts: [{ text: message.content }],
+        })),
+        { role: "user" as const, parts: [{ text: parsedBody.data.content }] },
+      ];
+      let response:
+        | Awaited<ReturnType<typeof ai.models.generateContent>>
+        | undefined;
+
+      let lastProviderError: unknown;
+      for (
+        let modelIndex = 0;
+        modelIndex < MODEL_CANDIDATES.length && !response;
+        modelIndex += 1
+      ) {
+        const model = MODEL_CANDIDATES[modelIndex];
+        const hasFallback = modelIndex < MODEL_CANDIDATES.length - 1;
+        const attemptsForModel = hasFallback ? 1 : 2;
+
+        for (let attempt = 0; attempt < attemptsForModel; attempt += 1) {
+          try {
+            response = await ai.models.generateContent({
+              model,
+              contents,
+              config: {
+                systemInstruction: SYSTEM_INSTRUCTION,
+                maxOutputTokens: 8192,
+                httpOptions: { timeout: 30_000 },
+              },
+            });
+            break;
+          } catch (error) {
+            lastProviderError = error;
+            const providerStatus = statusFromError(error);
+            const retryable =
+              RETRYABLE_PROVIDER_STATUSES.has(providerStatus ?? 0);
+
+            if (retryable && attempt < attemptsForModel - 1) {
+              req.log.warn(
+                {
+                  providerStatus,
+                  attempt: attempt + 1,
+                  model,
+                  providerMessage: safeProviderMessage(error),
+                },
+                "Retrying Gemini request after a transient provider error",
+              );
+              await new Promise((resolve) =>
+                setTimeout(resolve, 500 * 2 ** attempt),
+              );
+              continue;
+            }
+
+            if (hasFallback && (retryable || providerStatus === 404)) {
+              req.log.warn(
+                {
+                  providerStatus,
+                  model,
+                  fallbackModel: MODEL_CANDIDATES[modelIndex + 1],
+                  providerMessage: safeProviderMessage(error),
+                },
+                "Falling back to another Gemini model",
+              );
+              break;
+            }
+
+            throw error;
+          }
+        }
+      }
+
+      if (!response) {
+        throw lastProviderError ?? new Error("Gemini did not return a response.");
+      }
 
       const assistantContent = response.text?.trim();
       if (!assistantContent) {
@@ -270,15 +351,31 @@ router.post(
         });
         return;
       }
+      if (status === 503) {
+        req.log.warn(
+          { providerStatus: status, providerMessage: safeProviderMessage(error) },
+          "Gemini is temporarily unavailable",
+        );
+        res.status(503).json({
+          error: "Gemini is temporarily unavailable. Please try again shortly.",
+        });
+        return;
+      }
       if (status === 401 || status === 403) {
-        req.log.error({ providerStatus: status }, "Gemini rejected its API key");
+        req.log.error(
+          { providerStatus: status, providerMessage: safeProviderMessage(error) },
+          "Gemini rejected its API key",
+        );
         res.status(502).json({
           error: "Gemini rejected the API key. Check GEMINI_API_KEY in Replit Secrets.",
         });
         return;
       }
 
-      req.log.error({ providerStatus: status }, "Gemini request failed");
+      req.log.error(
+        { providerStatus: status, providerMessage: safeProviderMessage(error) },
+        "Gemini request failed",
+      );
       res.status(502).json({
         error: "Gemini could not respond. Please try again in a moment.",
       });
