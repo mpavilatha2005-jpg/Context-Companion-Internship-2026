@@ -1,0 +1,28 @@
+kind = "web"
+previewPath = "/"
+title = "Context Chat"
+description = "A conversational AI chat app that keeps separate conversation histories and manages context so the assistant can refer back to earlier messages."
+version = "1.0.0"
+id = "artifacts/context-chat"
+router = "path"
+
+[[services]]
+name = "web"
+paths = [ "/" ]
+localPort = 21016
+
+[services.development]
+run = "pnpm --filter @workspace/context-chat run dev"
+
+[services.production]
+build = [ "pnpm", "--filter", "@workspace/context-chat", "run", "build" ]
+serve = "static"
+publicDir = "artifacts/context-chat/dist/public"
+
+[[services.production.rewrites]]
+from = "/*"
+to = "/index.html"
+
+[services.env]
+PORT = "21016"
+BASE_PATH = "/"

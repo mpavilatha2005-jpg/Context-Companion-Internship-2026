@@ -1,0 +1,1 @@
+- [Chat session ownership](chat-session-scope.md) — conversations belong to a signed browser session; cross-device access needs explicit account authentication.
