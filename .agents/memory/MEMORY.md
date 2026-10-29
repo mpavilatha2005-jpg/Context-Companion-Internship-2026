@@ -1,1 +1,2 @@
 - [Chat session ownership](chat-session-scope.md) — conversations belong to a signed browser session; cross-device access needs explicit account authentication.
+- [Gemini model access and capacity](gemini-model-access.md) — verify live generation eligibility; model catalog visibility alone may not guarantee access.

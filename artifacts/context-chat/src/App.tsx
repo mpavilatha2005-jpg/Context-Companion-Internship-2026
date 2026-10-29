@@ -111,8 +111,8 @@ function Home() {
       if (!conversationId) {
         const conversation = await createConversation.mutateAsync();
         conversationId = conversation.id;
-        setActiveId(conversation.id);
         await queryClient.invalidateQueries({ queryKey: getListGeminiConversationsQueryKey() });
+        setActiveId(conversation.id);
       }
       setSendingCount(messages.length + 1);
       const turn = await sendMessage.mutateAsync({ conversationId, data: { content } });

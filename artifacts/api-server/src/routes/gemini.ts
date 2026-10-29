@@ -25,8 +25,8 @@ import { Router, type IRouter, type Request, type Response } from "express";
 
 const router: IRouter = Router();
 const MODEL_CANDIDATES = [
-  "gemini-3.8-flash",
   "gemini-3.5-flash-lite",
+  "gemini-3.8-flash",
 ] as const;
 const HISTORY_LIMIT = 20;
 const RETRYABLE_PROVIDER_STATUSES = new Set([408, 429, 500, 502, 503, 504]);
@@ -340,6 +340,16 @@ router.post(
     } catch (error) {
       const status = statusFromError(error);
       if (isTimeout(error)) {
+        res.status(504).json({
+          error: "Gemini took too long to respond. Please try again.",
+        });
+        return;
+      }
+      if (status === 504) {
+        req.log.warn(
+          { providerStatus: status, providerMessage: safeProviderMessage(error) },
+          "Gemini request exceeded its deadline",
+        );
         res.status(504).json({
           error: "Gemini took too long to respond. Please try again.",
         });
